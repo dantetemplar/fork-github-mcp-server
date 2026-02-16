@@ -983,11 +983,19 @@ type issueDependencyBody struct {
 
 // addOrRemoveIssueDependency adds or removes a blocked_by or blocking dependency via REST.
 // dependencyIssueNumber is resolved to the issue's numeric id (REST "id" field) via GET issue before sending.
-func addOrRemoveIssueDependency(ctx context.Context, client *github.Client, owner, repo string, issueNumber, dependencyIssueNumber int, kind string, add bool) (*mcp.CallToolResult, error) {
+// dependencyOwner and dependencyRepo specify where the dependency issue lives; if empty, same as owner/repo.
+func addOrRemoveIssueDependency(ctx context.Context, client *github.Client, owner, repo string, issueNumber int, dependencyOwner, dependencyRepo string, dependencyIssueNumber int, kind string, add bool) (*mcp.CallToolResult, error) {
 	if kind != "blocked_by" && kind != "blocking" {
 		return utils.NewToolResultError("kind must be blocked_by or blocking"), nil
 	}
-	depIssue, _, err := client.Issues.Get(ctx, owner, repo, dependencyIssueNumber)
+	depOwner, depRepo := dependencyOwner, dependencyRepo
+	if depOwner == "" {
+		depOwner = owner
+	}
+	if depRepo == "" {
+		depRepo = repo
+	}
+	depIssue, _, err := client.Issues.Get(ctx, depOwner, depRepo, dependencyIssueNumber)
 	if err != nil {
 		return utils.NewToolResultErrorFromErr("failed to get dependency issue", err), nil
 	}
@@ -1057,7 +1065,15 @@ func IssueDependencyWrite(t translations.TranslationHelperFunc) inventory.Server
 					},
 					"dependency_issue_number": {
 						Type:        "number",
-						Description: "The number of the other issue (blocked-by or blocking link)",
+						Description: "The number of the other issue (blocked-by or blocking link).",
+					},
+					"dependency_owner": {
+						Type:        "string",
+						Description: "Owner of the repository containing the dependency issue. If omitted, same as owner (same repo).",
+					},
+					"dependency_repo": {
+						Type:        "string",
+						Description: "Repository name containing the dependency issue. If omitted, same as repo (same repo).",
 					},
 				},
 				Required: []string{"method", "owner", "repo", "issue_number", "dependency_issue_number"},
@@ -1085,6 +1101,8 @@ func IssueDependencyWrite(t translations.TranslationHelperFunc) inventory.Server
 			if err != nil {
 				return utils.NewToolResultError(err.Error()), nil, nil
 			}
+			dependencyOwner, _ := OptionalParam[string](args, "dependency_owner")
+			dependencyRepo, _ := OptionalParam[string](args, "dependency_repo")
 			client, err := deps.GetClient(ctx)
 			if err != nil {
 				return utils.NewToolResultErrorFromErr("failed to get GitHub client", err), nil, nil
@@ -1103,7 +1121,7 @@ func IssueDependencyWrite(t translations.TranslationHelperFunc) inventory.Server
 			default:
 				return utils.NewToolResultError(fmt.Sprintf("unknown method: %s", method)), nil, nil
 			}
-			result, err := addOrRemoveIssueDependency(ctx, client, owner, repo, issueNumber, dependencyIssueNumber, kind, add)
+			result, err := addOrRemoveIssueDependency(ctx, client, owner, repo, issueNumber, dependencyOwner, dependencyRepo, dependencyIssueNumber, kind, add)
 			return result, nil, err
 		})
 }
