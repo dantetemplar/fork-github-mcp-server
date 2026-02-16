@@ -264,6 +264,8 @@ func AllTools(t translations.TranslationHelperFunc) []inventory.ServerTool {
 		ProjectsList(t),
 		ProjectsGet(t),
 		ProjectsWrite(t),
+		AssignIssueToOrgProject(t),
+		UpdateProjectItemFieldByNames(t),
 
 		// Label tools
 		GetLabel(t),

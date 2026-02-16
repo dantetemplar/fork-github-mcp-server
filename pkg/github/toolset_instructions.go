@@ -39,6 +39,10 @@ func generateProjectsToolsetInstructions(_ *inventory.Inventory) string {
 
 Workflow: 1) list_project_fields (get field IDs), 2) list_project_items (with pagination), 3) optional updates.
 
+Org project + Priority/Size:
+	- Use assign_issue_to_org_project to add an issue to an org project and optionally set Priority and Size by value name (e.g. "High", "Large").
+	- Use update_project_item_field_by_name to set Priority or Size on an existing project item by field and option name.
+
 Field usage:
 	- Call list_project_fields first to understand available fields and get IDs/types before filtering.
 	- Use EXACT returned field names (case-insensitive match). Don't invent names or IDs.
