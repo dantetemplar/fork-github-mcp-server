@@ -222,6 +222,45 @@ func Test_ProjectsList_ListProjectItems(t *testing.T) {
 	})
 }
 
+func Test_ProjectsList_ListProjectItemsRecent(t *testing.T) {
+	toolDef := ProjectsList(translations.NullTranslationHelper)
+	items := []map[string]any{
+		{"id": 1001, "created_at": "2025-02-16T10:00:00Z", "content_type": "Issue", "content": map[string]any{"title": "Latest"}, "item_url": "https://github.com/org/repo/issues/1"},
+		{"id": 1002, "created_at": "2025-02-15T10:00:00Z", "content_type": "Issue", "content": map[string]any{"title": "Older"}, "item_url": "https://github.com/org/repo/issues/2"},
+	}
+	t.Run("success organization", func(t *testing.T) {
+		mockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetOrgsProjectsV2ItemsByProject: mockResponse(t, http.StatusOK, items),
+		})
+		client := gh.NewClient(mockedClient)
+		deps := BaseDeps{Client: client}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "list_project_items_recent",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(3),
+			"limit":          float64(10),
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		textContent := getTextResult(t, result)
+		var response map[string]any
+		err = json.Unmarshal([]byte(textContent.Text), &response)
+		require.NoError(t, err)
+		itemsList, ok := response["items"].([]any)
+		require.True(t, ok)
+		assert.Equal(t, 2, len(itemsList))
+		assert.Equal(t, float64(2), response["count"])
+		first, ok := itemsList[0].(map[string]any)
+		require.True(t, ok)
+		assert.Contains(t, first, "id")
+		assert.Contains(t, first, "title")
+		assert.Contains(t, first, "created_at")
+	})
+}
+
 func Test_ProjectsGet(t *testing.T) {
 	// Verify tool definition once
 	toolDef := ProjectsGet(translations.NullTranslationHelper)
