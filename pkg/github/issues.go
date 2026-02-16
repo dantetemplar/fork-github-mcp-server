@@ -244,8 +244,10 @@ Options are:
 2. get_comments - Get issue comments.
 3. get_sub_issues - Get sub-issues of the issue.
 4. get_labels - Get labels assigned to the issue.
+5. get_blocked_by - List issues this issue is blocked by (Relationships: blocked by).
+6. get_blocking - List issues this issue is blocking (Relationships: blocking).
 `,
-				Enum: []any{"get", "get_comments", "get_sub_issues", "get_labels"},
+				Enum: []any{"get", "get_comments", "get_sub_issues", "get_labels", "get_blocked_by", "get_blocking"},
 			},
 			"owner": {
 				Type:        "string",
@@ -322,6 +324,12 @@ Options are:
 				return result, nil, err
 			case "get_labels":
 				result, err := GetIssueLabels(ctx, gqlClient, owner, repo, issueNumber)
+				return result, nil, err
+			case "get_blocked_by":
+				result, err := GetIssueDependencies(ctx, client, deps, owner, repo, issueNumber, "blocked_by", pagination)
+				return result, nil, err
+			case "get_blocking":
+				result, err := GetIssueDependencies(ctx, client, deps, owner, repo, issueNumber, "blocking", pagination)
 				return result, nil, err
 			default:
 				return utils.NewToolResultError(fmt.Sprintf("unknown method: %s", method)), nil, nil
@@ -507,6 +515,43 @@ func GetSubIssues(ctx context.Context, client *github.Client, deps ToolDependenc
 		return nil, fmt.Errorf("failed to marshal response: %w", err)
 	}
 
+	return utils.NewToolResultText(string(r)), nil
+}
+
+// GetIssueDependencies lists issue dependencies (blocked_by or blocking) via the REST API.
+func GetIssueDependencies(ctx context.Context, client *github.Client, deps ToolDependencies, owner, repo string, issueNumber int, kind string, pagination PaginationParams) (*mcp.CallToolResult, error) {
+	if kind != "blocked_by" && kind != "blocking" {
+		return utils.NewToolResultError("kind must be blocked_by or blocking"), nil
+	}
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/dependencies/%s", owner, repo, issueNumber, kind)
+	if pagination.Page > 0 || pagination.PerPage > 0 {
+		params := make([]string, 0, 2)
+		if pagination.Page > 0 {
+			params = append(params, fmt.Sprintf("page=%d", pagination.Page))
+		}
+		if pagination.PerPage > 0 {
+			params = append(params, fmt.Sprintf("per_page=%d", pagination.PerPage))
+		}
+		path += "?" + strings.Join(params, "&")
+	}
+	req, err := client.NewRequest(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	var issues []*github.Issue
+	resp, err := client.Do(ctx, req, &issues)
+	if err != nil {
+		return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to list issue dependencies", resp, err), nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return ghErrors.NewGitHubAPIStatusErrorResponse(ctx, "failed to list issue dependencies", resp, body), nil
+	}
+	r, err := json.Marshal(issues)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal response: %w", err)
+	}
 	return utils.NewToolResultText(string(r)), nil
 }
 
@@ -929,6 +974,131 @@ func ReprioritizeSubIssue(ctx context.Context, client *github.Client, owner stri
 	}
 
 	return utils.NewToolResultText(string(r)), nil
+}
+
+// issueDependencyBody is the request body for add/remove issue dependency.
+type issueDependencyBody struct {
+	IssueNumber int `json:"issue_number"`
+}
+
+// addOrRemoveIssueDependency adds or removes a blocked_by or blocking dependency via REST.
+func addOrRemoveIssueDependency(ctx context.Context, client *github.Client, owner, repo string, issueNumber, dependencyIssueNumber int, kind string, add bool) (*mcp.CallToolResult, error) {
+	if kind != "blocked_by" && kind != "blocking" {
+		return utils.NewToolResultError("kind must be blocked_by or blocking"), nil
+	}
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/dependencies/%s", owner, repo, issueNumber, kind)
+	body := &issueDependencyBody{IssueNumber: dependencyIssueNumber}
+	var req *http.Request
+	var err error
+	if add {
+		req, err = client.NewRequest(http.MethodPost, path, body)
+	} else {
+		req, err = client.NewRequest(http.MethodDelete, path, body)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := client.Do(ctx, req, nil)
+	if err != nil {
+		return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to update issue dependency", resp, err), nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	ok := add && (resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK) ||
+		!add && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent)
+	if !ok {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return ghErrors.NewGitHubAPIStatusErrorResponse(ctx, "failed to update issue dependency", resp, bodyBytes), nil
+	}
+	out := map[string]string{"status": "ok"}
+	if add {
+		out["message"] = fmt.Sprintf("dependency %s added", kind)
+	} else {
+		out["message"] = fmt.Sprintf("dependency %s removed", kind)
+	}
+	r, _ := json.Marshal(out)
+	return utils.NewToolResultText(string(r)), nil
+}
+
+// IssueDependencyWrite creates a tool to add or remove issue relationships (blocked by / blocking).
+func IssueDependencyWrite(t translations.TranslationHelperFunc) inventory.ServerTool {
+	return NewTool(
+		ToolsetMetadataIssues,
+		mcp.Tool{
+			Name:        "issue_dependency_write",
+			Description: t("TOOL_ISSUE_DEPENDENCY_WRITE_DESCRIPTION", "Add or remove issue relationships: mark an issue as blocked by another, or as blocking another (Relationships field)."),
+			Annotations: &mcp.ToolAnnotations{
+				Title:        t("TOOL_ISSUE_DEPENDENCY_WRITE_USER_TITLE", "Change issue dependency"),
+				ReadOnlyHint: false,
+			},
+			InputSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"method": {
+						Type: "string",
+						Description: `Action: add_blocked_by, remove_blocked_by, add_blocking, remove_blocking.
+- add_blocked_by: current issue is blocked by the given issue.
+- remove_blocked_by: remove that blocked-by link.
+- add_blocking: current issue blocks the given issue.
+- remove_blocking: remove that blocking link.`,
+						Enum: []any{"add_blocked_by", "remove_blocked_by", "add_blocking", "remove_blocking"},
+					},
+					"owner": {Type: "string", Description: "Repository owner"},
+					"repo":  {Type: "string", Description: "Repository name"},
+					"issue_number": {
+						Type:        "number",
+						Description: "The number of the issue to update (the one whose Relationships we change)",
+					},
+					"dependency_issue_number": {
+						Type:        "number",
+						Description: "The number of the other issue (blocked-by or blocking link)",
+					},
+				},
+				Required: []string{"method", "owner", "repo", "issue_number", "dependency_issue_number"},
+			},
+		},
+		[]scopes.Scope{scopes.Repo},
+		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+			method, err := RequiredParam[string](args, "method")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			owner, err := RequiredParam[string](args, "owner")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			repo, err := RequiredParam[string](args, "repo")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			issueNumber, err := RequiredInt(args, "issue_number")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			dependencyIssueNumber, err := RequiredInt(args, "dependency_issue_number")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			client, err := deps.GetClient(ctx)
+			if err != nil {
+				return utils.NewToolResultErrorFromErr("failed to get GitHub client", err), nil, nil
+			}
+			var kind string
+			var add bool
+			switch method {
+			case "add_blocked_by":
+				kind, add = "blocked_by", true
+			case "remove_blocked_by":
+				kind, add = "blocked_by", false
+			case "add_blocking":
+				kind, add = "blocking", true
+			case "remove_blocking":
+				kind, add = "blocking", false
+			default:
+				return utils.NewToolResultError(fmt.Sprintf("unknown method: %s", method)), nil, nil
+			}
+			result, err := addOrRemoveIssueDependency(ctx, client, owner, repo, issueNumber, dependencyIssueNumber, kind, add)
+			return result, nil, err
+		})
 }
 
 // SearchIssues creates a tool to search for issues.

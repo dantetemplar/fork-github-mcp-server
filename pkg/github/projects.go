@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 
 	ghErrors "github.com/github/github-mcp-server/pkg/errors"
 	"github.com/github/github-mcp-server/pkg/inventory"
@@ -30,8 +31,9 @@ const (
 const (
 	projectsMethodListProjects      = "list_projects"
 	projectsMethodListProjectFields = "list_project_fields"
-	projectsMethodListProjectItems  = "list_project_items"
-	projectsMethodGetProject        = "get_project"
+	projectsMethodListProjectItems        = "list_project_items"
+	projectsMethodListProjectItemsRecent  = "list_project_items_recent"
+	projectsMethodGetProject              = "get_project"
 	projectsMethodGetProjectField   = "get_project_field"
 	projectsMethodGetProjectItem    = "get_project_item"
 	projectsMethodAddProjectItem    = "add_project_item"
@@ -63,6 +65,7 @@ Use this tool to list projects for a user or organization, or list project field
 							projectsMethodListProjects,
 							projectsMethodListProjectFields,
 							projectsMethodListProjectItems,
+							projectsMethodListProjectItemsRecent,
 						},
 					},
 					"owner_type": {
@@ -76,7 +79,11 @@ Use this tool to list projects for a user or organization, or list project field
 					},
 					"project_number": {
 						Type:        "number",
-						Description: "The project's number. Required for 'list_project_fields' and 'list_project_items' methods.",
+						Description: "The project's number. Required for 'list_project_fields', 'list_project_items', and 'list_project_items_recent' methods.",
+					},
+					"limit": {
+						Type:        "number",
+						Description: "Max number of items to return (1–25). Only for 'list_project_items_recent'. Default 10.",
 					},
 					"query": {
 						Type:        "string",
@@ -156,6 +163,18 @@ Use this tool to list projects for a user or organization, or list project field
 					}
 				}
 				return listProjectItems(ctx, client, args, owner, ownerType)
+			case projectsMethodListProjectItemsRecent:
+				if ownerType == "" {
+					projectNumber, err := RequiredInt(args, "project_number")
+					if err != nil {
+						return utils.NewToolResultError(err.Error()), nil, nil
+					}
+					ownerType, err = detectOwnerType(ctx, client, owner, projectNumber)
+					if err != nil {
+						return utils.NewToolResultError(err.Error()), nil, nil
+					}
+				}
+				return listProjectItemsRecent(ctx, client, args, owner, ownerType)
 			default:
 				return utils.NewToolResultError(fmt.Sprintf("unknown method: %s", method)), nil, nil
 			}
@@ -680,6 +699,18 @@ func listProjectItems(ctx context.Context, client *github.Client, args map[strin
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Sort by CreatedAt descending (newest first)
+	sort.Slice(projectItems, func(i, j int) bool {
+		ti, tj := projectItems[i].CreatedAt, projectItems[j].CreatedAt
+		if ti == nil {
+			return false
+		}
+		if tj == nil {
+			return true
+		}
+		return ti.After(tj.Time)
+	})
+
 	response := map[string]any{
 		"items":    projectItems,
 		"pageInfo": buildPageInfo(resp),
@@ -691,6 +722,96 @@ func listProjectItems(ctx context.Context, client *github.Client, args map[strin
 	}
 
 	return utils.NewToolResultText(string(r)), nil, nil
+}
+
+const maxRecentProjectItems = 25
+
+func listProjectItemsRecent(ctx context.Context, client *github.Client, args map[string]any, owner, ownerType string) (*mcp.CallToolResult, any, error) {
+	projectNumber, err := RequiredInt(args, "project_number")
+	if err != nil {
+		return utils.NewToolResultError(err.Error()), nil, nil
+	}
+	limit, err := OptionalIntParamWithDefault(args, "limit", 10)
+	if err != nil {
+		return utils.NewToolResultError(err.Error()), nil, nil
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > maxRecentProjectItems {
+		limit = maxRecentProjectItems
+	}
+
+	perPage := limit
+	opts := &github.ListProjectItemsOptions{
+		ListProjectsOptions: github.ListProjectsOptions{
+			ListProjectsPaginationOptions: github.ListProjectsPaginationOptions{PerPage: &perPage},
+		},
+	}
+	var resp *github.Response
+	var projectItems []*github.ProjectV2Item
+	if ownerType == "org" {
+		projectItems, resp, err = client.Projects.ListOrganizationProjectItems(ctx, owner, projectNumber, opts)
+	} else {
+		projectItems, resp, err = client.Projects.ListUserProjectItems(ctx, owner, projectNumber, opts)
+	}
+	if err != nil {
+		return ghErrors.NewGitHubAPIErrorResponse(ctx, ProjectListFailedError, resp, err), nil, nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	sort.Slice(projectItems, func(i, j int) bool {
+		ti, tj := projectItems[i].CreatedAt, projectItems[j].CreatedAt
+		if ti == nil {
+			return false
+		}
+		if tj == nil {
+			return true
+		}
+		return ti.After(tj.Time)
+	})
+
+	items := make([]map[string]any, 0, len(projectItems))
+	for _, it := range projectItems {
+		createdAt := ""
+		if it.CreatedAt != nil {
+			createdAt = it.CreatedAt.Format("2006-01-02")
+		}
+		contentType := ""
+		if it.ContentType != nil {
+			contentType = string(*it.ContentType)
+		}
+		items = append(items, map[string]any{
+			"id":           it.GetID(),
+			"title":        projectItemTitle(it),
+			"created_at":   createdAt,
+			"content_type": contentType,
+			"item_url":     it.GetItemURL(),
+		})
+	}
+	response := map[string]any{"items": items, "count": len(items)}
+	r, err := json.Marshal(response)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal response: %w", err)
+	}
+	return utils.NewToolResultText(string(r)), nil, nil
+}
+
+func projectItemTitle(item *github.ProjectV2Item) string {
+	if item == nil || item.Content == nil {
+		return ""
+	}
+	c := item.Content
+	if c.GetIssue() != nil {
+		return c.GetIssue().GetTitle()
+	}
+	if c.GetPullRequest() != nil {
+		return c.GetPullRequest().GetTitle()
+	}
+	if c.GetDraftIssue() != nil {
+		return c.GetDraftIssue().GetTitle()
+	}
+	return ""
 }
 
 func getProject(ctx context.Context, client *github.Client, owner, ownerType string, projectNumber int) (*mcp.CallToolResult, any, error) {

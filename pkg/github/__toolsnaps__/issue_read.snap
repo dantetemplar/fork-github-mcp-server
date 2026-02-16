@@ -11,12 +11,14 @@
         "type": "number"
       },
       "method": {
-        "description": "The read operation to perform on a single issue.\nOptions are:\n1. get - Get details of a specific issue.\n2. get_comments - Get issue comments.\n3. get_sub_issues - Get sub-issues of the issue.\n4. get_labels - Get labels assigned to the issue.\n",
+        "description": "The read operation to perform on a single issue.\nOptions are:\n1. get - Get details of a specific issue.\n2. get_comments - Get issue comments.\n3. get_sub_issues - Get sub-issues of the issue.\n4. get_labels - Get labels assigned to the issue.\n5. get_blocked_by - List issues this issue is blocked by (Relationships: blocked by).\n6. get_blocking - List issues this issue is blocking (Relationships: blocking).\n",
         "enum": [
           "get",
           "get_comments",
           "get_sub_issues",
-          "get_labels"
+          "get_labels",
+          "get_blocked_by",
+          "get_blocking"
         ],
         "type": "string"
       },
