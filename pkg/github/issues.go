@@ -976,23 +976,26 @@ func ReprioritizeSubIssue(ctx context.Context, client *github.Client, owner stri
 	return utils.NewToolResultText(string(r)), nil
 }
 
-// issueDependencyBody is the request body for add/remove issue dependency (API expects issue_id = GraphQL node ID).
+// issueDependencyBody is the request body for add/remove issue dependency (API expects issue_id = numeric id from GET /repos/.../issues/{n}).
 type issueDependencyBody struct {
-	IssueID string `json:"issue_id"`
+	IssueID int64 `json:"issue_id"`
 }
 
 // addOrRemoveIssueDependency adds or removes a blocked_by or blocking dependency via REST.
-// dependencyIssueNumber is resolved to the issue's GraphQL node ID before sending (API requires issue_id).
-func addOrRemoveIssueDependency(ctx context.Context, client *github.Client, gqlClient *githubv4.Client, owner, repo string, issueNumber, dependencyIssueNumber int, kind string, add bool) (*mcp.CallToolResult, error) {
+// dependencyIssueNumber is resolved to the issue's numeric id (REST "id" field) via GET issue before sending.
+func addOrRemoveIssueDependency(ctx context.Context, client *github.Client, owner, repo string, issueNumber, dependencyIssueNumber int, kind string, add bool) (*mcp.CallToolResult, error) {
 	if kind != "blocked_by" && kind != "blocking" {
 		return utils.NewToolResultError("kind must be blocked_by or blocking"), nil
 	}
-	dependencyIssueID, _, err := fetchIssueIDs(ctx, gqlClient, owner, repo, dependencyIssueNumber, 0)
+	depIssue, _, err := client.Issues.Get(ctx, owner, repo, dependencyIssueNumber)
 	if err != nil {
-		return utils.NewToolResultErrorFromErr("failed to resolve dependency issue to ID", err), nil
+		return utils.NewToolResultErrorFromErr("failed to get dependency issue", err), nil
+	}
+	if depIssue == nil || depIssue.ID == nil {
+		return utils.NewToolResultError("dependency issue has no id"), nil
 	}
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/dependencies/%s", owner, repo, issueNumber, kind)
-	body := &issueDependencyBody{IssueID: fmt.Sprint(dependencyIssueID)}
+	body := &issueDependencyBody{IssueID: depIssue.GetID()}
 	var req *http.Request
 	if add {
 		req, err = client.NewRequest(http.MethodPost, path, body)
@@ -1086,10 +1089,6 @@ func IssueDependencyWrite(t translations.TranslationHelperFunc) inventory.Server
 			if err != nil {
 				return utils.NewToolResultErrorFromErr("failed to get GitHub client", err), nil, nil
 			}
-			gqlClient, err := deps.GetGQLClient(ctx)
-			if err != nil {
-				return utils.NewToolResultErrorFromErr("failed to get GitHub GraphQL client", err), nil, nil
-			}
 			var kind string
 			var add bool
 			switch method {
@@ -1104,7 +1103,7 @@ func IssueDependencyWrite(t translations.TranslationHelperFunc) inventory.Server
 			default:
 				return utils.NewToolResultError(fmt.Sprintf("unknown method: %s", method)), nil, nil
 			}
-			result, err := addOrRemoveIssueDependency(ctx, client, gqlClient, owner, repo, issueNumber, dependencyIssueNumber, kind, add)
+			result, err := addOrRemoveIssueDependency(ctx, client, owner, repo, issueNumber, dependencyIssueNumber, kind, add)
 			return result, nil, err
 		})
 }
